@@ -3,6 +3,7 @@ config.json
 
 # Binary hasil build (hanya di root, jangan kena folder cmd/wa-relay)
 /wa-relay
+/wa-relay.*
 /bin/
 
 # Runtime state: sesi, seen, delegasi. Dibuang/di-reset tiap restart.
@@ -11,6 +12,9 @@ config.json
 state/
 state/session.json
 state/work-session.json
+
+# Lampiran masuk/keluar hasil runtime (bisa berisi file pribadi)
+media/
 
 # Log & pidfile runtime
 relay.log
