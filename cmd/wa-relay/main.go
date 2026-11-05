@@ -39,14 +39,40 @@ func main() {
 		os.Exit(1)
 	}
 	seen := relay.LoadSeen(filepath.Join(stateDir, "seen.json"), relay.MaxSeen)
+
+	// CATATAN PENTING (disengaja): sesi chat TIDAK dilanjutkan antar restart.
+	// Setiap kali relay di-start, id sesi lama dibuang di sini walau file
+	// state/session.json masih ada, jadi pesan berikutnya selalu mulai obrolan
+	// baru. Ini keputusan sadar supaya relay tidak pernah nyangkut id sesi yang
+	// sudah dihapus dari opencode ("Session not found"). Konsekuensinya: memori
+	// percakapan hilang tiap restart — kalau butuh konteks lama, cukup kirim
+	// pesan lagi, agent akan mulai dari nol.
+	// File runtime ini ada di state/ yang sudah di-gitignore (lihat .gitignore:
+	// baris "state/"), jadi tidak ikut ter-commit.
 	session := relay.LoadSession(filepath.Join(stateDir, "session.json"))
-	workSession := (*relay.SessionStore)(nil)
+	if err := session.Set(""); err != nil {
+		log.Warn("clear session on start: %v", err)
+	}
+	// Sesi tugas berat memang selalu baru per task (tidak pernah disimpan),
+	// jadi cukup dipastikan kosong juga.
+	workSession := relay.LoadSession(filepath.Join(stateDir, "work-session.json"))
 	if cfg.WorkSessionFile != "" {
 		workSession = relay.LoadSession(cfg.WorkSessionFile)
-	} else {
-		workSession = relay.LoadSession(filepath.Join(stateDir, "work-session.json"))
+	}
+	if err := workSession.Set(""); err != nil {
+		log.Warn("clear work session on start: %v", err)
 	}
 	delegations := relay.LoadDelegationStore(filepath.Join(stateDir, "delegations.json"), cfg.DelegationTTL())
+
+	// Stepi (receptionist/lane chat) punya working directory sendiri.
+	chatRunner := &relay.ExecRunner{Bin: cfg.OpencodeBin, Workdir: cfg.ChatWorkdir, BaseDir: cfg.ChatWorkdir, Agent: cfg.Agent, Model: cfg.ChatModelName(), Timeout: cfg.Timeout()}
+	// Tim teknis (lane work) dapat satu runner per workdir build; jumlahnya
+	// menentukan berapa build yang boleh paralel.
+	workDirs := cfg.WorkWorkdirList()
+	workRunners := make([]relay.TaskRunner, 0, len(workDirs))
+	for _, dir := range workDirs {
+		workRunners = append(workRunners, &relay.ExecRunner{Bin: cfg.OpencodeBin, Workdir: dir, BaseDir: dir, Agent: cfg.WorkAgentName(), Model: cfg.WorkModelName(), Timeout: cfg.Timeout()})
+	}
 
 	r := relay.NewRelayWithWork(
 		cfg,
@@ -54,12 +80,17 @@ func main() {
 		seen,
 		session,
 		workSession,
-		&relay.ExecRunner{Bin: cfg.OpencodeBin, Workdir: cfg.Workdir, BaseDir: cfg.BaseDir, Agent: cfg.Agent, Timeout: cfg.Timeout()},
+		chatRunner,
 		&relay.WacliSender{Bin: cfg.WacliBin, Phone: cfg.OwnerPhone},
 		&relay.WacliMarkReader{Bin: cfg.WacliBin},
 	)
-	r.SetWorkRunner(&relay.ExecRunner{Bin: cfg.OpencodeBin, Workdir: cfg.Workdir, BaseDir: cfg.BaseDir, Agent: cfg.WorkAgentName(), Timeout: cfg.Timeout()})
+	r.SetWorkPool(workRunners)
 	r.SetDelegations(delegations)
+	if cfg.IncomingMediaEnabled {
+		r.SetMediaDownloader(&relay.WacliMediaDownloader{Bin: cfg.WacliBin, Dir: cfg.MediaDir})
+	}
+	log.Info("workdirs chat=%s work=%v (slot build=%d)", cfg.ChatWorkdir, workDirs, len(workDirs))
+	log.Info("models chat=%v (aktif=%s) work=%s", cfg.ChatModelList(), cfg.ChatModelName(), cfg.WorkModelName())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

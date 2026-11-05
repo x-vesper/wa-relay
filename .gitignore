@@ -1,7 +1,25 @@
+# Config lokal (berisi secret, owner, path) — jangan di-commit
 config.json
-wa-relay
+
+# Binary hasil build (hanya di root, jangan kena folder cmd/wa-relay)
+/wa-relay
+/wa-relay.*
+/bin/
+
+# Runtime state: sesi, seen, delegasi. Dibuang/di-reset tiap restart.
+# state/session.json sengaja TIDAK dilanjutkan antar restart (lihat
+# cmd/wa-relay/main.go), jadi jangan pernah di-commit.
 state/
+state/session.json
+state/work-session.json
+
+# Lampiran masuk/keluar hasil runtime (bisa berisi file pribadi)
+media/
+
+# Log & pidfile runtime
 relay.log
 sync.log
 *.pid
+
+# Tooling
 .aider*

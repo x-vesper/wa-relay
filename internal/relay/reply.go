@@ -5,29 +5,115 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 func (r *Relay) sendChunked(text string) {
 	text = strings.TrimSpace(text)
-	if text == "" {
-		text = "(kosong)"
+	// Balasan agent boleh menyelipkan directive lampiran (lihat fileDirectiveRe).
+	// Ambil directivenya lebih dulu, sisa teks tetap dikirim sebagai pesan biasa.
+	text, files := parseFileDirectives(text)
+	text = strings.TrimSpace(text)
+	if r.fileSendingEnabled() {
+		if text == "" && len(files) == 0 {
+			text = "(kosong)"
+		}
+	} else {
+		if len(files) > 0 {
+			r.log.Warn("send file dimatikan, %d lampiran diabaikan", len(files))
+			files = nil
+		}
+		if text == "" {
+			text = "(kosong)"
+		}
 	}
-	chunks := chunkText(text, defaultChunk)
-	for i, chunk := range chunks {
-		err := r.sender.Send(chunk)
-		if err != nil {
-			r.log.Error("wacli send chunk %d/%d ok=false err=%v", i+1, len(chunks), err)
-			if i == 0 && text != "(kosong)" {
-				r.sender.Send("(kosong)")
+	if text != "" {
+		chunks := chunkText(text, defaultChunk)
+		for i, chunk := range chunks {
+			err := r.sender.Send(chunk)
+			if err != nil {
+				r.log.Error("wacli send chunk %d/%d ok=false err=%v", i+1, len(chunks), err)
+				if i == 0 && text != "(kosong)" {
+					r.sender.Send("(kosong)")
+				}
+				continue
 			}
+			r.log.Info("wacli send chunk %d/%d ok=true", i+1, len(chunks))
+		}
+	}
+	for _, f := range files {
+		r.sendFile(f)
+	}
+}
+
+// fileSendingEnabled melaporkan apakah directive lampiran boleh dikirim keluar.
+// Default aktif bila config belum diisi (mis. di test).
+func (r *Relay) fileSendingEnabled() bool {
+	return r.cfg == nil || r.cfg.SendFileEnabled
+}
+
+func (r *Relay) sendFile(f outFile) {
+	if err := r.sender.SendFile(f.Path, f.Caption); err != nil {
+		r.log.Error("wacli send file ok=false path=%s err=%v", f.Path, err)
+		return
+	}
+	r.log.Info("wacli send file ok=true path=%s caption=%t", f.Path, f.Caption != "")
+}
+
+// outFile adalah lampiran yang diminta agent lewat directive di balasannya.
+type outFile struct {
+	Path    string
+	Caption string
+}
+
+// fileDirectiveRe mencocokkan satu baris directive lampiran:
+//
+//	[[file:/path/absolut/ke/file.jpg|caption opsional]]
+//
+// Directive harus menempati satu baris sendiri (bukan disisipkan di tengah
+// kalimat) supaya teks biasa yang kebetulan memuat pola serupa tidak ikut
+// terkirim sebagai lampiran.
+var fileDirectiveRe = regexp.MustCompile(`^\[\[file:\s*(.+?)\s*(?:\|\s*(.*?)\s*)?\]\]$`)
+
+// parseFileDirectives memisahkan directive lampiran dari teks balasan. Baris
+// yang menyerupai directive tapi menunjuk ke path tidak valid (bukan absolut
+// atau file tidak ada) dibiarkan sebagai teks biasa, sehingga diskusi kode
+// tentang directive ini tidak memicu kiriman file.
+func parseFileDirectives(text string) (string, []outFile) {
+	if !strings.Contains(text, "[[file:") {
+		return text, nil
+	}
+	lines := strings.Split(text, "\n")
+	kept := make([]string, 0, len(lines))
+	var files []outFile
+	for _, line := range lines {
+		m := fileDirectiveRe.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil {
+			kept = append(kept, line)
 			continue
 		}
-		r.log.Info("wacli send chunk %d/%d ok=true", i+1, len(chunks))
+		path := strings.TrimSpace(m[1])
+		if !validOutFilePath(path) {
+			kept = append(kept, line)
+			continue
+		}
+		files = append(files, outFile{Path: path, Caption: strings.TrimSpace(m[2])})
 	}
+	return strings.Join(kept, "\n"), files
+}
+
+func validOutFilePath(path string) bool {
+	if path == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func chunkText(text string, size int) []string {
@@ -47,6 +133,49 @@ func chunkText(text string, size int) []string {
 		out = append(out, string(runes[i:end]))
 	}
 	return out
+}
+
+// isMissingSession melaporkan apakah kegagalan opencode disebabkan sesi yang
+// diminta sudah tidak ada lagi di DB (mis. sesi dihapus manual). opencode
+// menulis "Error: Session not found" ke stderr lalu keluar dengan status 1.
+func isMissingSession(stderr string) bool {
+	return strings.Contains(strings.ToLower(stderr), "session not found")
+}
+
+// agentErrorDetail mengambil pesan error dari event NDJSON `opencode run`
+// (tipe "error") atau dari stderr. OpenCode menulis error provider seperti
+// kuota/limit ke stdout, jadi tanpa ini penyebabnya cuma kelihatan di log.
+func agentErrorDetail(stdout, stderr string) string {
+	var msgs []string
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if len(line) < 2 || line[0] != '{' {
+			continue
+		}
+		var ev struct {
+			Type  string `json:"type"`
+			Error struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal([]byte(line), &ev) != nil || ev.Type != "error" {
+			continue
+		}
+		msg := strings.TrimSpace(ev.Error.Message)
+		if msg == "" {
+			continue
+		}
+		if label := strings.TrimSpace(ev.Error.Type); label != "" {
+			msg = label + ": " + msg
+		}
+		msgs = append(msgs, msg)
+	}
+	detail := strings.Join(msgs, "\n")
+	if detail == "" {
+		detail = strings.TrimSpace(stderr)
+	}
+	return truncateRunes(detail, failureDetailMaxRune)
 }
 
 func errorNote(err error, stderr string) string {
@@ -199,4 +328,18 @@ func truncateRunes(s string, max int) string {
 		return s
 	}
 	return string(runes[:max])
+}
+
+// truncateBytes memotong string agar tidak melebihi max byte, dengan menjaga
+// batas rune tetap valid (tidak memotong di tengah karakter UTF-8). Dipakai
+// sebagai jaring pengaman ukuran prompt rangkuman.
+func truncateBytes(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	cut := s[:max]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut + "\n\n[...output dipotong karena terlalu panjang...]"
 }

@@ -5,34 +5,58 @@
   "owner_jid": "62xxxxxxxxxx@s.whatsapp.net",
   "owner_phone": "62812xxxxxxx",
   "workdir": "/home/zakaria/projects/wa-relay",
+  "chat_workdir": "/home/zakaria/projects/wa-relay",
+  "work_workdirs": [
+    "/home/zakaria/projects/wa-relay-build-1",
+    "/home/zakaria/projects/wa-relay-build-2"
+  ],
   "agent": "stepi",
+  "chat_models": [
+    "openrouter/stealth/crouton-alpha#minimal",
+    "openrouter/recursive/flint-v1.0:free",
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free",
+    "opencode/deepseek-v4.1-flash-free"
+  ],
+  "work_model": "opencode/deepseek-v4.1-flash-free",
+  "command_prefix": "!",
   "ack_delay_seconds": 300,
   "ack_messages": [
     "Sayang, pesanmu udah aku baca kok... ini aku kerjain ya.",
-    "Mas, udah aku baca pesanmu. Aku kerjain sekarang ya.",
-    "Honney, aku baca ya... langsung aku kerjain.",
+    "Bos, udah aku baca pesanmu. Aku kerjain sekarang ya.",
+    "Sayang, aku baca ya... langsung aku kerjain.",
     "Oke sayang, udah aku baca. Aku kerjain dulu ya.",
-    "Mas, aku baca pesanmu ya. Ini aku kerjain sekarang.",
+    "Bos, aku baca pesanmu ya. Ini aku kerjain sekarang.",
     "Sayang, udah aku baca kok. Aku kerjain ya.",
-    "Honney, pesanmu udah aku baca. Aku kerjain sekarang ya.",
-    "Oke mas, udah aku baca... aku kerjain ya.",
+    "Sayang, pesanmu udah aku baca. Aku kerjain sekarang ya.",
+    "Oke bos, udah aku baca... aku kerjain ya.",
     "Sayang, ini aku baca terus aku kerjain ya.",
-    "Mas, udah aku baca. Aku kerjain sekarang ya."
+    "Bos, udah aku baca. Aku kerjain sekarang ya."
   ],
   "ack_followups": [
     {
       "after_seconds": 600,
       "messages": [
         "Mas maaf ya, aku agak lama... task-nya susah soalnya. Sabar dikit lagi ya.",
-        "Maaf honney, ini agak ribet jadi lama. Aku lagi kerjain serius nih.",
+        "Maaf sayang, ini agak ribet jadi lama. Aku lagi kerjain serius nih.",
         "Sayang maaf, aku belum kelar... masalahnya susah, bentar lagi ya."
       ]
     }
   ],
+  "work_agent": "build",
+  "auto_work_routing": false,
+  "handover_keywords": [
+    "serahin ke pak budi",
+    "serahkan ke tim teknis"
+  ],
+  "handover_ack": "Oke Pak, tugasnya aku serahin ke Pak Budi ya.",
   "opencode_bin": "opencode",
   "wacli_bin": "wacli",
   "num_workers": 3,
+  "chat_workers": 1,
   "timeout_seconds": 900,
   "mark_read": true,
+  "send_file_enabled": true,
+  "incoming_media_enabled": true,
+  "media_dir": "/home/zakaria/projects/wa-relay/state/media",
   "log_file": "/home/zakaria/projects/wa-relay/relay.log"
 }

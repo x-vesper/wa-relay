@@ -3,8 +3,10 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -149,6 +151,62 @@ func TestSessionSetEmptyResetsMetadata(t *testing.T) {
 	st := s.Snapshot()
 	if st.ID != "" || st.Turns != 0 || !st.StartedAt.IsZero() {
 		t.Fatalf("state setelah /reset = %+v, want kosong", st)
+	}
+}
+
+// missingSessionRunner meniru opencode yang menolak id sesi tak dikenal
+// ("Session not found") tapi sukses saat diminta membuat sesi baru.
+type missingSessionRunner struct {
+	mu       sync.Mutex
+	sessions []string
+	stdout   string
+}
+
+func (m *missingSessionRunner) Run(_ context.Context, _ string, sessionID string) (string, string, error) {
+	m.mu.Lock()
+	m.sessions = append(m.sessions, sessionID)
+	stdout := m.stdout
+	m.mu.Unlock()
+	if sessionID != "" {
+		return "", "Error: Session not found", errors.New("exit status 1")
+	}
+	return stdout, "", nil
+}
+
+func (m *missingSessionRunner) used() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.sessions...)
+}
+
+// Sesi yang sudah dihapus dari DB tidak boleh bikin relay macet permanen:
+// percobaan pertama gagal "Session not found", relay melepas pointer lalu
+// mengulang dengan sesi baru dan membalas normal.
+func TestRelayRecoversFromMissingSession(t *testing.T) {
+	cfg := testConfig(t)
+	runner := &missingSessionRunner{stdout: `{"type":"step_start","sessionID":"ses_new"}` + "\n" +
+		`{"type":"text","part":{"text":"halo"}}`}
+	sender := &stubSender{}
+	r := newTestRelay(t, cfg, runner, sender)
+
+	writeSessionFile(t, r.session.Path(), State{
+		ID:        "ses_dead",
+		StartedAt: time.Now().Add(-time.Hour),
+		LastUsed:  time.Now().Add(-time.Minute),
+		Turns:     2,
+	})
+	r.session = LoadSession(r.session.Path())
+
+	r.handleMessage(context.Background(), taskItem{ID: "m1", Text: "halo", Chat: "6281@s.whatsapp.net"})
+
+	if got := runner.used(); len(got) != 2 || got[0] != "ses_dead" || got[1] != "" {
+		t.Fatalf("sesi yang dipakai = %v, want [ses_dead \"\"]", got)
+	}
+	if st := r.session.Snapshot(); st.ID != "ses_new" {
+		t.Fatalf("id sesi = %q, want ses_new", st.ID)
+	}
+	if msgs := sender.messages(); len(msgs) == 0 || msgs[len(msgs)-1] != "halo" {
+		t.Fatalf("balasan terkirim = %v, want halo", msgs)
 	}
 }
 

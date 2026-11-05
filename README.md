@@ -21,7 +21,27 @@ wacli sync --follow  ──webhook──►  wa-relay (Go)  (127.0.0.1:8791/hook
                               parse jawaban agent ──► wacli send text ──► Owner
 ```
 
-Pesan `ping` (case-insensitive) dibalas `pong` langsung tanpa memanggil agent. Pesan `/reset` menghapus konteks sesi sehingga pesan berikutnya mulai obrolan baru.
+Pesan `!ping` (case-insensitive; `ping` polos juga masih diterima) dibalas `pong` langsung tanpa memanggil agent. `!help` menampilkan daftar perintah, `!model` menampilkan/mengganti model chat, `!worker` (alias `!cek`) menampilkan status slot build, dan `!reset` (alias `!restart`) menghapus konteks sesi sehingga pesan berikutnya mulai obrolan baru.
+
+### Stepi sebagai resepsionis (serah terima ke tim teknis)
+
+Secara default **semua** pesan ditangani stepi (lane chat) dan stepi **tidak** mengerjakan tugas
+teknis sendiri. Kalau bos memerintah, stepi menyerahkannya ke tim teknis (agent `work_agent`,
+default `build`):
+
+- Pemicu default (bisa ditambah lewat `handover_keywords`): kata kerja serah terima seperti `serahin`,
+  `serahkan`, `serah`, `limpahin`, `delegasikan` — bukan sekadar menyebut nama target. Contoh:
+  *"serahin aja tugasnya ke Pak Budi"*. Kalimat yang dinegasi (`jangan serahin...`) atau berupa
+  pertanyaan (`udah kamu serahin ke pak budi?`, `pak budi udah kerja?`) **tidak** memicu serah terima
+  baru — cuma dijawab stepi sebagai obrolan biasa.
+- Stepi menyusun **spesifikasi tugas dari konteks obrolan** (jadi bisa menyerahkan tugas yang
+  disebut di pesan sebelumnya), mengirim ack singkat (`handover_ack`), lalu build dijalankan di
+  latar belakang (lane work, workdir `work_workdirs`) dan hasilnya dirangkum stepi untuk bos.
+- Kalau semua slot build terpakai, stepi mengabari bos bahwa tim sedang sibuk.
+- Routing otomatis berdasarkan kata kunci teknis/panjang pesan **dimatikan secara default**
+  (`auto_work_routing: false`). Set `auto_work_routing: true` untuk mengaktifkan perilaku lama
+  (pesan teknis otomatis diusulkan ke lane work + minta konfirmasi "setuju?").
+
 
 ### Ingatan sesi (session continuity)
 
@@ -29,9 +49,29 @@ Relay menyimpan `sessionID` opencode di `state/session.json`. Pesan pertama memb
 (`--title wa-relay`), lalu pesan-pesan berikutnya dijalankan dengan `opencode run --session <id>`
 sehingga agent **ingat percakapan sebelumnya** (tidak lagi lupa konteks antar pesan).
 
-- Kirim `/reset` (persis, boleh ada spasi) di WhatsApp untuk menghapus sesi dan mulai dari nol.
-- Hapus manual: `rm state/session.json` lalu restart relay.
-- Catatan: sesi yang terus lanjut akan makin panjang (token makin besar) — pakai `/reset` sesekali.
+- **Sesi sengaja di-reset tiap restart relay.** Saat start, id sesi lama dibuang (lihat catatan di
+  `cmd/wa-relay/main.go`), jadi tiap restart selalu mulai obrolan baru. Ini disengaja supaya relay
+  tidak nyangkut id sesi yang sudah dihapus dari opencode (`Session not found`).
+- Kirim `!reset` atau `!restart` (boleh ada spasi) di WhatsApp untuk menghapus sesi dan mulai dari nol.
+- Sesi juga otomatis di-rollover kalau nganggur >24 jam, umur >7 hari, atau >20 pesan.
+
+### File & foto (dinamis)
+
+Relay tidak pernah mengirim lampiran kecuali agent memintanya, jadi chat teks biasa tetap ringan.
+
+- **Kirim (agent → WA):** kalau agent ingin mengirim sebuah file/foto, dia menulis directive di baris sendiri:
+  `[[file:/path/absolut/ke/file.jpg|caption opsional]]` (caption boleh dikosongkan: `[[file:/path/file.jpg]]`).
+  Relay mengirim sisa teks sebagai pesan biasa lalu lampirannya lewat `wacli send file`. Directive hanya
+  diproses bila menempati satu baris penuh, path-nya absolut, dan file-nya benar-benar ada — jadi diskusi kode
+  tentang directive ini tidak ikut memicu kiriman. Matikan dengan `send_file_enabled: false`.
+- **Terima (owner → agent):** pesan berlampiran diunduh ke `media_dir` lewat `wacli media download`, lalu path
+  lokalnya disisipkan ke prompt sehingga agent bisa membaca foto/dokumen tersebut. Matikan dengan
+  `incoming_media_enabled: false`.
+
+
+- Kalau id sesi tersimpan ternyata sudah hilang, relay otomatis melepas pointer dan mulai sesi baru
+  (tidak macet permanen).
+- Catatan: sesi yang terus lanjut akan makin panjang (token makin besar) — pakai `!reset` sesekali.
 
 ## Spesifikasi payload & signature (wacli)
 
@@ -53,15 +93,30 @@ sehingga agent **ingat percakapan sebelumnya** (tidak lagi lupa konteks antar pe
 | `host` / `port` | Alamat listen relay (default `127.0.0.1:8791`) |
 | `webhook_secret` | Secret HMAC untuk verifikasi signature |
 | `owner_jid` / `owner_phone` | JID & nomor owner (satu-satunya pengirim yang diproses) |
-| `workdir` | `--dir` untuk `opencode run` |
+| `workdir` | folder kerja `opencode run` (lewat cwd proses) |
+| `chat_workdir` | folder kerja stepi (lane chat), idealnya worktree terpisah dari build |
+| `work_workdirs` | Daftar workdir build; satu entri = satu slot build paralel |
+| `work_agent` | Agent opencode untuk tim teknis (default `build`) |
 | `agent` | Nama agent opencode yang menjawab (`--agent`, default `stepi`) |
+| `chat_models` | Daftar model opencode untuk lane chat/stepi; entri pertama jadi default, bisa diganti saat runtime lewat `!model` |
+| `chat_model` | Model tunggal lane chat (dipakai bila `chat_models` kosong) |
+| `work_model` | Model opencode untuk lane build (`--model`), mis. `opencode/deepseek-v4.1-flash-free` |
+| `model` | Fallback model kalau `chat_models`/`chat_model`/`work_model` kosong; kosong = default opencode |
+| `command_prefix` | Awalan perintah WhatsApp (default `!`); mis. `!help`, `!model`, `!ping`, `!reset` |
+| `auto_work_routing` | Routing otomatis pesan teknis ke lane work (default `false` = stepi resepsionis) |
+| `handover_keywords` | Frasa tambahan pemicu serah terima ke tim teknis (selain default) |
+| `handover_ack` | Pesan singkat saat tugas diserahkan (default: "Oke Pak, tugasnya aku serahin ke Pak Budi ya.") |
 | `ack_delay_seconds` | Kirim ack pertama hanya bila task masih jalan melewati detik ini (default 300 = 5 menit); `0` untuk menonaktifkan |
 | `ack_messages` | Pool ack pertama (dipilih acak), dikirim setelah `ack_delay_seconds`; `[]` untuk menonaktifkan |
 | `ack_followups` | Array `{after_seconds, messages}`, pesan susulan bila task belum selesai (default 600s) |
 | `opencode_bin` / `wacli_bin` | Path binary |
 | `num_workers` | Jumlah worker paralel yang menguras antrean (default 3) |
+| `chat_workers` | Jumlah worker khusus lane chat (pesan ringan stepi), terpisah dari lane work (default 1) |
 | `timeout_seconds` | Timeout `opencode run` (default 900) |
 | `mark_read` | Tandai pesan owner sebagai sudah dibaca / kirim read receipt lewat `wacli chats mark-read --receipts` (default `true`); dikirim tepat sebelum balasan final, bukan saat pesan masuk |
+| `send_file_enabled` | Izinkan relay mengirim file/foto ke WA saat agent menyelipkan directive lampiran (default `true`) |
+| `incoming_media_enabled` | Unduh lampiran (foto/file) dari owner supaya agent bisa membacanya (default `true`) |
+| `media_dir` | Direktori penyimpanan lampiran masuk (default `<base>/state/media`) |
 | `log_file` | Log file relay |
 
 `opencode.json` berisi permission untuk agent yang di-spawn relay: allow read/edit/glob/grep/list, `external_directory` allow-all, bash allow-all tapi **last-match-wins deny** untuk `rm -rf *`, `sudo *`, `git push *`. Longgarkan/ketatkan sesuai kebutuhan.
@@ -69,7 +124,7 @@ sehingga agent **ingat percakapan sebelumnya** (tidak lagi lupa konteks antar pe
 ## Build & pemakaian
 
 ```bash
-go build -o wa-relay ./cmd/wa-relay   # atau langsung ./start.sh (auto-build kalau binary belum ada)
+go build -o wa-relay ./cmd/wa-relay   # atau langsung ./start.sh (auto-build kalau binary belum ada / source berubah)
 ./start.sh               # restart relay + sync (delegasi ke systemd jika terpasang)
 ./stop.sh                # stop keduanya
 go test ./...            # jalankan test

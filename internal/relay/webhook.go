@@ -22,6 +22,36 @@ type hookPayload struct {
 	EventType string          `json:"EventType"`
 }
 
+// MediaInfo adalah objek Media yang wacli sertakan pada pesan berlampiran.
+// Pesan tanpa media memakai Media: null. Field attachment internal
+// (MediaKey, DirectPath, dll.) tidak diekspor wacli, jadi unduhan dilakukan
+// lewat `wacli media download`.
+type MediaInfo struct {
+	Type       string `json:"Type"`
+	Caption    string `json:"Caption"`
+	Filename   string `json:"Filename"`
+	MimeType   string `json:"MimeType"`
+	FileLength int64  `json:"FileLength"`
+}
+
+// hasMedia melaporkan apakah payload membawa lampiran (Media bukan null/kosong).
+func (m *hookPayload) hasMedia() bool {
+	s := strings.TrimSpace(string(m.Media))
+	return s != "" && s != "null"
+}
+
+// mediaInfo mengembalikan objek Media yang ter-parse, atau nil bila tidak ada.
+func (m *hookPayload) mediaInfo() *MediaInfo {
+	if !m.hasMedia() {
+		return nil
+	}
+	var mi MediaInfo
+	if err := json.Unmarshal(m.Media, &mi); err != nil {
+		return nil
+	}
+	return &mi
+}
+
 func verifySignature(secret string, body []byte, header string) bool {
 	if secret == "" {
 		return true
@@ -62,8 +92,13 @@ func shouldIgnore(cfg *Config, msg *hookPayload) (string, bool) {
 	if isBlockedJID(msg.Chat) || isBlockedJID(sender) {
 		return "group/status", true
 	}
+	// Pesan berlampiran boleh tanpa teks. Bila penanganan lampiran dimatikan,
+	// lampiran diabaikan dan hanya teksnya yang diproses (jadi tanpa teks tetap
+	// dibuang).
 	if strings.TrimSpace(msg.Text) == "" {
-		return "empty", true
+		if !msg.hasMedia() || !cfg.IncomingMediaEnabled {
+			return "empty", true
+		}
 	}
 	return "", false
 }
@@ -117,6 +152,9 @@ func (r *Relay) handleHook(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	item := taskItem{ID: msg.ID, Text: strings.TrimSpace(msg.Text), Chat: chatTarget(r.cfg, &msg), Lane: Classify(r.cfg, msg.Text)}
+	if r.cfg.IncomingMediaEnabled {
+		item.Media = msg.mediaInfo()
+	}
 	// Target antrean menurut lane, supaya tugas berat tidak pernah macet di
 	// antrean chat dan sebaliknya. `queue` (legacy) tetap jadi fallback.
 	var target chan taskItem

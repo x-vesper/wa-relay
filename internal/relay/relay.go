@@ -16,9 +16,11 @@ type Relay struct {
 	workQueue   chan taskItem
 	runner      TaskRunner
 	workRunner  TaskRunner       // runner khusus lane work; nil = pakai runner
+	workPool    *runnerPool      // pool runner build (satu slot per workdir)
 	delegations *DelegationStore // delegasi pending menunggu konfirmasi bos
 	sender      Sender
 	reader      MarkReader
+	media       MediaDownloader // pengunduh lampiran masuk (opsional)
 	gate        sessionGate
 }
 
@@ -50,9 +52,45 @@ func (r *Relay) SetWorkRunner(runner TaskRunner) {
 	r.workRunner = runner
 }
 
+// SetWorkPool memasang pool runner build (satu runner per working directory).
+// Bila semua slot terpakai, build berikutnya ditolak dan bos dikabari "tim
+// sibuk". Bila tidak dipanggil, lane work memakai workRunner/runner tunggal
+// tanpa batas slot.
+func (r *Relay) SetWorkPool(runners []TaskRunner) {
+	r.workPool = newRunnerPool(runners)
+}
+
+// acquireWork memesan satu slot build. ok=false berarti semua slot terpakai;
+// pemanggil harus mengabari bos alih-alih menjalankan build. release wajib
+// dipanggil setelah build selesai (aman dipanggil berkali-kali).
+func (r *Relay) acquireWork() (runner TaskRunner, release func(), ok bool) {
+	if r.workPool != nil {
+		return r.workPool.acquire()
+	}
+	if r.workRunner != nil {
+		return r.workRunner, func() {}, true
+	}
+	return r.runner, func() {}, true
+}
+
+// workAvailable melaporkan apakah masih ada slot build bebas, tanpa memesan.
+func (r *Relay) workAvailable() bool {
+	if r.workPool != nil {
+		return r.workPool.available()
+	}
+	return true
+}
+
 // SetDelegations memasang penyimpanan delegasi pending (konfirmasi bos).
 func (r *Relay) SetDelegations(store *DelegationStore) {
 	r.delegations = store
+}
+
+// SetMediaDownloader memasang pengunduh lampiran masuk. Bila tidak dipasang,
+// pesan berlampiran tetap diproses tapi tanpa file lokal (agent tidak bisa
+// membacanya).
+func (r *Relay) SetMediaDownloader(d MediaDownloader) {
+	r.media = d
 }
 
 func (r *Relay) chatWorker(ctx context.Context) {
@@ -208,9 +246,38 @@ func (r *Relay) gateKey(lane Lane, sessionID, fallbackID string) string {
 // run menjalankan prompt lewat runner lane terkait, diserialisasi per sesi
 // lewat gate supaya tidak ada dua `opencode run` pada sesi yang sama.
 func (r *Relay) run(ctx context.Context, lane Lane, sessionID, fallbackID, prompt string) (string, string, error) {
+	return r.runWith(ctx, r.runnerFor(lane), lane, sessionID, fallbackID, prompt)
+}
+
+// runWith menjalankan prompt lewat runner tertentu (mis. slot build dari pool),
+// diserialisasi per sesi lewat gate.
+func (r *Relay) runWith(ctx context.Context, runner TaskRunner, lane Lane, sessionID, fallbackID, prompt string) (string, string, error) {
 	unlock := r.gate.lock(r.gateKey(lane, sessionID, fallbackID))
 	defer unlock()
-	return r.runnerFor(lane).Run(ctx, prompt, sessionID)
+	return runner.Run(ctx, prompt, sessionID)
+}
+
+// runRecovering menjalankan prompt lewat runner tertentu, dan bila opencode
+// menolak karena sesi yang tersimpan sudah tidak ada lagi ("Session not found",
+// mis. sesi dihapus manual dari DB) pointer sesi dilepas lalu prompt diulang
+// sekali dengan sesi baru. Tanpa ini, satu sesi yang hilang bikin relay macet
+// permanen: setiap pesan berikutnya memakai id mati yang sama dan gagal terus
+// sampai /reset atau rollover. Return usedID adalah id yang benar-benar
+// diteruskan; "" berarti sesi baru dimulai, jadi pemanggil wajib menyimpan id
+// barunya dari stdout.
+func (r *Relay) runRecovering(ctx context.Context, runner TaskRunner, lane Lane, sessionID, fallbackID, prompt string) (stdout, stderr, usedID string, err error) {
+	stdout, stderr, err = r.runWith(ctx, runner, lane, sessionID, fallbackID, prompt)
+	if err == nil || sessionID == "" || !isMissingSession(stderr) {
+		return stdout, stderr, sessionID, err
+	}
+	r.log.Warn("sesi opencode hilang id=%s lane=%s, lepas pointer & mulai sesi baru", sessionID, lane)
+	if store := r.sessionFor(lane); store != nil {
+		if cerr := store.Set(""); cerr != nil {
+			r.log.Error("session clear failed: %v", cerr)
+		}
+	}
+	stdout, stderr, err = r.runWith(ctx, runner, lane, "", fallbackID, prompt)
+	return stdout, stderr, "", err
 }
 
 func (r *Relay) chatSessionPath() string {
