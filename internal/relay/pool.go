@@ -67,3 +67,27 @@ func (p *runnerPool) size() int {
 	}
 	return len(p.runners)
 }
+
+// poolSlot adalah snapshot satu slot build untuk ditampilkan ke bos.
+type poolSlot struct {
+	Workdir string
+	Busy    bool
+}
+
+// status mengembalikan snapshot semua slot tanpa memesan atau mengubah state.
+func (p *runnerPool) status() []poolSlot {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]poolSlot, len(p.runners))
+	for i, runner := range p.runners {
+		dir := ""
+		if w, ok := runner.(interface{ WorkdirPath() string }); ok {
+			dir = w.WorkdirPath()
+		}
+		out[i] = poolSlot{Workdir: dir, Busy: p.busy[i]}
+	}
+	return out
+}

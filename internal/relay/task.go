@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -33,7 +34,10 @@ type ExecRunner struct {
 	Workdir string
 	BaseDir string
 	Agent   string
+	Model   string
 	Timeout time.Duration
+
+	modelMu sync.RWMutex
 }
 
 // args builds the `opencode run` argument list. Prompt TIDAK ikut di sini:
@@ -42,9 +46,14 @@ type ExecRunner struct {
 // (MAX_ARG_STRLEN ~128KB) yang bikin fork/exec gagal dengan
 // "argument list too long". Exposed for testing.
 func (r *ExecRunner) args(sessionID string) []string {
-	args := []string{"run", "--dir", r.Workdir, "--format", "json", "--title", "wa-relay"}
+	// OpenCode V2 menghapus flag --dir. Directory kerja sekarang ditentukan
+	// lewat cwd proses (lihat Run), bukan argumen command.
+	args := []string{"run", "--format", "json", "--title", "wa-relay"}
 	if r.Agent != "" {
 		args = append(args, "--agent", r.Agent)
+	}
+	if model := r.CurrentModel(); model != "" {
+		args = append(args, "--model", model)
 	}
 	if sessionID != "" {
 		args = append(args, "--session", sessionID)
@@ -52,11 +61,38 @@ func (r *ExecRunner) args(sessionID string) []string {
 	return args
 }
 
+func (r *ExecRunner) workdir() string {
+	if r.Workdir != "" {
+		return r.Workdir
+	}
+	return r.BaseDir
+}
+
+// WorkdirPath mengembalikan working directory runner untuk ditampilkan pada
+// status worker. Runner lain boleh tidak mengimplementasikan ini.
+func (r *ExecRunner) WorkdirPath() string {
+	return r.workdir()
+}
+
+// CurrentModel mengembalikan model yang sedang dipakai runner.
+func (r *ExecRunner) CurrentModel() string {
+	r.modelMu.RLock()
+	defer r.modelMu.RUnlock()
+	return r.Model
+}
+
+// SetModel mengganti model runner untuk pemanggilan berikutnya.
+func (r *ExecRunner) SetModel(model string) {
+	r.modelMu.Lock()
+	r.Model = model
+	r.modelMu.Unlock()
+}
+
 func (r *ExecRunner) Run(ctx context.Context, prompt, sessionID string) (string, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.Timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, r.Bin, r.args(sessionID)...)
-	cmd.Dir = r.BaseDir
+	cmd.Dir = r.workdir()
 	// Prompt lewat stdin: `opencode run` membaca pesan dari stdin bila tidak ada
 	// positional message, jadi prompt besar tidak dibatasi argumen OS.
 	cmd.Stdin = strings.NewReader(prompt)

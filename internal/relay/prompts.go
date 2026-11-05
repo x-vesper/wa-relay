@@ -40,6 +40,16 @@ const summarizePromptTemplate = "Hasil pengerjaan tim teknis untuk tugas:\n---\n
 	" Sampaikan status selesai + poin penting saja. Jangan terlalu teknis kecuali dibutuhkan." +
 	" Langsung ke balasan, tanpa proses berpikir, tanpa judul markdown, tanpa tabel, tanpa fence kode."
 
+// failurePromptTemplate diteruskan ke stepi saat worker gagal menjalankan
+// tugas, supaya penyebabnya dijelaskan dengan konteks obrolan (bukan cuma
+// tempelan error mentah).
+const failurePromptTemplate = "Laporan dari tim teknis: tugas yang tadi didelegasikan GAGAL.\n" +
+	"Tugas:\n---\n%s\n---\n" +
+	"Detail error:\n---\n%s\n---\n" +
+	"Sampaikan ke bos dengan singkat dan natural (bahasa Indonesia santai/gaul) bahwa tugasnya gagal. " +
+	"Jelaskan penyebabnya kalau jelas (mis. limit kuota, timeout, error provider) dan kasih saran langkah berikutnya. " +
+	"Jangan bilang tugasnya selesai. Langsung ke balasan, tanpa proses berpikir, tanpa judul markdown, tanpa tabel, tanpa fence kode."
+
 // handoverPromptTemplate diteruskan ke stepi saat bos memerintah menyerahkan
 // tugas ke tim teknis. Stepi (yang punya konteks obrolan) merumuskan
 // spesifikasi tugas yang jelas untuk tim teknis.

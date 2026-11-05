@@ -60,7 +60,7 @@ var defaultHandoverVerbs = []string{
 // config heavy_keywords) hanya aktif bila cfg.AutoWorkRouting diset true.
 func Classify(cfg *Config, text string) Lane {
 	t := strings.TrimSpace(text)
-	if t == "" || isFastCommand(t) {
+	if t == "" || isFastCommand(cfg, t) {
 		return LaneChat
 	}
 	if cfg == nil || !cfg.AutoWorkRouting {
@@ -79,18 +79,65 @@ func Classify(cfg *Config, text string) Lane {
 	return LaneChat
 }
 
+// CommandPrefix mengembalikan awalan perintah yang aktif. Default "!".
+func CommandPrefix(cfg *Config) string {
+	if cfg != nil {
+		if p := strings.TrimSpace(cfg.CommandPrefix); p != "" {
+			return p
+		}
+	}
+	return defaultCommandPrefix
+}
+
+// commandName memecah teks menjadi nama perintah (lowercase) bila diawali
+// prefix. Boolean kedua menandakan teks memang berawalan prefix, termasuk
+// saat tidak ada nama perintah setelahnya (mis. cuma "!").
+func commandName(cfg *Config, text string) (string, bool) {
+	fields := commandArgs(cfg, text)
+	if len(fields) == 0 {
+		return "", isPrefixed(cfg, text)
+	}
+	return strings.ToLower(fields[0]), true
+}
+
+// commandArgs mengembalikan argumen perintah tanpa prefix. Contoh:
+// "!model 2" -> ["model", "2"].
+func commandArgs(cfg *Config, text string) []string {
+	prefix := CommandPrefix(cfg)
+	t := strings.TrimSpace(text)
+	if !strings.HasPrefix(t, prefix) {
+		return nil
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(t, prefix))
+	if rest == "" {
+		return nil
+	}
+	return strings.Fields(rest)
+}
+
+func isPrefixed(cfg *Config, text string) bool {
+	return strings.HasPrefix(strings.TrimSpace(text), CommandPrefix(cfg))
+}
+
 // isResetCommand melaporkan apakah teks adalah perintah untuk mereset sesi
-// obrolan. "/reset" adalah bentuk lama; "!restart" alias yang sama. Keduanya
-// case-insensitive dan boleh diapit spasi.
-func isResetCommand(t string) bool {
-	s := strings.TrimSpace(t)
-	return strings.EqualFold(s, "/reset") || strings.EqualFold(s, "!restart")
+// obrolan: "<prefix>reset" atau alias "<prefix>restart". "/reset" tetap
+// diterima sebagai bentuk lama agar kebiasaan lama tidak langsung rusak.
+func isResetCommand(cfg *Config, t string) bool {
+	if name, ok := commandName(cfg, t); ok {
+		return name == "reset" || name == "restart"
+	}
+	return strings.EqualFold(strings.TrimSpace(t), "/reset")
 }
 
 // isFastCommand melaporkan apakah teks adalah perintah fast-path (tanpa
-// pemanggilan agent) yang ditangani langsung oleh handleMessage.
-func isFastCommand(t string) bool {
-	return strings.EqualFold(t, "ping") || isResetCommand(t)
+// pemanggilan agent) yang ditangani langsung oleh handleMessage. Perintah
+// dengan prefix yang tidak dikenal juga masuk fast-path supaya dibalas
+// petunjuk, bukan dikirim ke agent.
+func isFastCommand(cfg *Config, t string) bool {
+	if _, ok := commandName(cfg, t); ok {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(t), "ping") || isResetCommand(cfg, t)
 }
 
 // sessionGate mengunci sesi berdasarkan kunci (id sesi, atau path store saat

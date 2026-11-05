@@ -215,12 +215,17 @@ python3 -c "import json;json.load(open('config.json'));print('config OK')"
 | `webhook_secret` | string | — | secret HMAC verifikasi webhook wacli |
 | `owner_jid` | string | — | JID WhatsApp owner (satu-satunya yang diproses) |
 | `owner_phone` | string | — | nomor owner (target kirim balasan) |
-| `workdir` | string | folder repo | fallback; `--dir` umum untuk opencode |
+| `workdir` | string | folder repo | fallback; folder kerja `opencode run` (cwd) |
 | `chat_workdir` | string | = `workdir` | folder kerja **stepi** (chat) |
 | `work_workdirs` | []string | `[workdir]` | folder kerja **tim build**; jumlah entri = jumlah slot build paralel |
 | `work_busy_prompt` | string | template bawaan | prompt ke stepi saat semua slot build penuh |
 | `agent` | string | `stepi` | nama agent opencode untuk chat |
 | `work_agent` | string | `build` | nama agent opencode untuk tugas berat |
+| `command_prefix` | string | `!` | awalan perintah WhatsApp, mis. `!help`, `!model`, `!ping`, `!reset` |
+| `chat_models` | []string | default opencode | daftar model lane chat/stepi; entri pertama default, bisa diganti lewat `!model` |
+| `chat_model` | string | default opencode | model tunggal lane chat (dipakai bila `chat_models` kosong) |
+| `work_model` | string | default opencode | model lane build, mis. `opencode/deepseek-v4.1-flash-free` |
+| `model` | string | default opencode | fallback bila model per lane kosong |
 | `ack_delay_seconds` | int | `300` | kirim ack pertama hanya bila task masih jalan > detik ini (`0` = mati) |
 | `ack_messages` | []string | pool bawaan | kandidat pesan ack (dipilih acak) |
 | `ack_followups` | array | 1 entri | `{after_seconds, messages}` pesan susulan |
@@ -466,7 +471,7 @@ journalctl --user -u wa-relay.service -f
 Dari WhatsApp:
 
 ```
-/reset
+!reset
 ```
 
 Dari server (efektif setelah restart):
@@ -479,8 +484,11 @@ systemctl --user restart wa-relay.service
 
 ### 9.3 Fast-path
 
-- Kirim `ping` → dibalas `pong` tanpa memanggil agent.
-- Kirim `/reset` → sesi dihapus, balasan konfirmasi.
+- Kirim `!help` → daftar perintah yang tersedia.
+- Kirim `!model` → lihat model chat aktif & daftar pilihan; `!model 2` untuk ganti.
+- Kirim `!worker` (alias `!cek`) → lihat slot build yang aktif/bebas.
+- Kirim `!ping` → dibalas `pong` tanpa memanggil agent.
+- Kirim `!reset` → sesi dihapus, balasan konfirmasi.
 
 ### 9.4 Working directory: stepi vs tim build
 
@@ -514,7 +522,7 @@ git branch -D wa-build-3
 2. Relay verifikasi HMAC, filter (hanya owner, bukan `FromMe`, bukan grup),
    dedupe by `ID`, balas `200` segera.
 3. Pesan diklasifikasi:
-   - perintah cepat (`ping`, `/reset`) → fast-path,
+   - perintah cepat (`!help`, `!model`, `!worker`, `!ping`, `!reset`) → fast-path,
    - mengandung kata kunci berat **atau** lebih panjang dari `light_max_len`
      → **lane work**,
    - sisanya → **lane chat** (stepi).

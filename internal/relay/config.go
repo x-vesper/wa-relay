@@ -36,8 +36,24 @@ type Config struct {
 	// WorkBusyPrompt adalah prompt ke stepi saat semua slot build terpakai,
 	// supaya stepi memberi tahu bos bahwa tim sedang sibuk semua. Kosong ->
 	// pakai busyPromptTemplate.
-	WorkBusyPrompt  string        `json:"work_busy_prompt"`
-	Agent           string        `json:"agent"`
+	WorkBusyPrompt string `json:"work_busy_prompt"`
+	Agent          string `json:"agent"`
+	// Model adalah fallback model opencode (format provider/model) untuk lane
+	// yang tidak mengisi chat_model/work_model. Kosong -> ikut default
+	// opencode.
+	Model string `json:"model"`
+	// ChatModel adalah model tunggal untuk lane chat (stepi). Bila diisi, ia
+	// menjadi default dan satu-satunya pilihan. Untuk beberapa model yang bisa
+	// diganti saat runtime lewat !model, isi ChatModels.
+	ChatModel string `json:"chat_model"`
+	// ChatModels adalah daftar model untuk lane chat. Entri pertama menjadi
+	// default. Bisa diganti saat relay berjalan lewat perintah !model.
+	ChatModels []string `json:"chat_models"`
+	// WorkModel adalah model untuk lane build.
+	WorkModel string `json:"work_model"`
+	// CommandPrefix adalah awalan perintah WhatsApp (default "!"). Contoh:
+	// dengan prefix "!", perintahnya menjadi !help, !ping, !reset.
+	CommandPrefix   string        `json:"command_prefix"`
 	AckDelaySeconds int           `json:"ack_delay_seconds"`
 	AckMessages     []string      `json:"ack_messages"`
 	AckFollowups    []AckFollowup `json:"ack_followups"`
@@ -128,6 +144,47 @@ func (c *Config) Timeout() time.Duration {
 		s = 480
 	}
 	return time.Duration(s) * time.Second
+}
+
+// ChatModelName mengembalikan model lane chat default: entri pertama
+// chat_models, lalu chat_model, lalu model.
+func (c *Config) ChatModelName() string {
+	if len(c.ChatModelList()) > 0 {
+		return c.ChatModelList()[0]
+	}
+	if c.ChatModel != "" {
+		return c.ChatModel
+	}
+	return c.Model
+}
+
+// ChatModelList mengembalikan daftar model lane chat yang valid. Bila
+// chat_models kosong, daftar berisi satu model dari chat_model/model (bila ada).
+func (c *Config) ChatModelList() []string {
+	out := make([]string, 0, len(c.ChatModels))
+	for _, m := range c.ChatModels {
+		if m = strings.TrimSpace(m); m != "" {
+			out = append(out, m)
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	if c.ChatModel != "" {
+		return []string{c.ChatModel}
+	}
+	if c.Model != "" {
+		return []string{c.Model}
+	}
+	return nil
+}
+
+// WorkModelName mengembalikan model lane work: work_model, fallback ke model.
+func (c *Config) WorkModelName() string {
+	if c.WorkModel != "" {
+		return c.WorkModel
+	}
+	return c.Model
 }
 
 // SessionRollPolicy menerjemahkan config jadi kebijakan rollover sesi. Nilai
@@ -264,6 +321,7 @@ func LoadConfig(path string) (*Config, error) {
 		Host:            "127.0.0.1",
 		Port:            8791,
 		Agent:           "stepi",
+		CommandPrefix:   defaultCommandPrefix,
 		AckDelaySeconds: 300,
 		AckMessages: []string{
 			"Sayang, pesanmu udah aku baca kok... ini aku kerjain ya.",

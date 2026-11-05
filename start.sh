@@ -5,8 +5,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# bangun binary jika belum ada
-if [ ! -x ./wa-relay ]; then
+# bangun binary jika belum ada atau source lebih baru dari binary terakhir
+if [ ! -x ./wa-relay ] \
+  || [ -n "$(find ./cmd ./internal -name '*.go' -newer ./wa-relay -print -quit 2>/dev/null)" ] \
+  || [ ./go.mod -nt ./wa-relay ] \
+  || { [ -f ./go.sum ] && [ ./go.sum -nt ./wa-relay ]; }; then
   echo "building wa-relay..."
   go build -o wa-relay ./cmd/wa-relay
 fi

@@ -142,6 +142,42 @@ func isMissingSession(stderr string) bool {
 	return strings.Contains(strings.ToLower(stderr), "session not found")
 }
 
+// agentErrorDetail mengambil pesan error dari event NDJSON `opencode run`
+// (tipe "error") atau dari stderr. OpenCode menulis error provider seperti
+// kuota/limit ke stdout, jadi tanpa ini penyebabnya cuma kelihatan di log.
+func agentErrorDetail(stdout, stderr string) string {
+	var msgs []string
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if len(line) < 2 || line[0] != '{' {
+			continue
+		}
+		var ev struct {
+			Type  string `json:"type"`
+			Error struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal([]byte(line), &ev) != nil || ev.Type != "error" {
+			continue
+		}
+		msg := strings.TrimSpace(ev.Error.Message)
+		if msg == "" {
+			continue
+		}
+		if label := strings.TrimSpace(ev.Error.Type); label != "" {
+			msg = label + ": " + msg
+		}
+		msgs = append(msgs, msg)
+	}
+	detail := strings.Join(msgs, "\n")
+	if detail == "" {
+		detail = strings.TrimSpace(stderr)
+	}
+	return truncateRunes(detail, failureDetailMaxRune)
+}
+
 func errorNote(err error, stderr string) string {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "(error: timeout: agent terlalu lama)"

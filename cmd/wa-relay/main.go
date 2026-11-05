@@ -65,13 +65,13 @@ func main() {
 	delegations := relay.LoadDelegationStore(filepath.Join(stateDir, "delegations.json"), cfg.DelegationTTL())
 
 	// Stepi (receptionist/lane chat) punya working directory sendiri.
-	chatRunner := &relay.ExecRunner{Bin: cfg.OpencodeBin, Workdir: cfg.ChatWorkdir, BaseDir: cfg.ChatWorkdir, Agent: cfg.Agent, Timeout: cfg.Timeout()}
+	chatRunner := &relay.ExecRunner{Bin: cfg.OpencodeBin, Workdir: cfg.ChatWorkdir, BaseDir: cfg.ChatWorkdir, Agent: cfg.Agent, Model: cfg.ChatModelName(), Timeout: cfg.Timeout()}
 	// Tim teknis (lane work) dapat satu runner per workdir build; jumlahnya
 	// menentukan berapa build yang boleh paralel.
 	workDirs := cfg.WorkWorkdirList()
 	workRunners := make([]relay.TaskRunner, 0, len(workDirs))
 	for _, dir := range workDirs {
-		workRunners = append(workRunners, &relay.ExecRunner{Bin: cfg.OpencodeBin, Workdir: dir, BaseDir: dir, Agent: cfg.WorkAgentName(), Timeout: cfg.Timeout()})
+		workRunners = append(workRunners, &relay.ExecRunner{Bin: cfg.OpencodeBin, Workdir: dir, BaseDir: dir, Agent: cfg.WorkAgentName(), Model: cfg.WorkModelName(), Timeout: cfg.Timeout()})
 	}
 
 	r := relay.NewRelayWithWork(
@@ -90,6 +90,7 @@ func main() {
 		r.SetMediaDownloader(&relay.WacliMediaDownloader{Bin: cfg.WacliBin, Dir: cfg.MediaDir})
 	}
 	log.Info("workdirs chat=%s work=%v (slot build=%d)", cfg.ChatWorkdir, workDirs, len(workDirs))
+	log.Info("models chat=%v (aktif=%s) work=%s", cfg.ChatModelList(), cfg.ChatModelName(), cfg.WorkModelName())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

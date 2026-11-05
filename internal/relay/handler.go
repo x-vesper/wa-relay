@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -10,26 +11,7 @@ import (
 func (r *Relay) handleMessage(ctx context.Context, item taskItem) {
 	start := time.Now()
 	r.log.Info("task start id=%s text_len=%d", item.ID, len(item.Text))
-	if strings.EqualFold(strings.TrimSpace(item.Text), "ping") {
-		r.markRead(item.Chat)
-		r.sendChunked("pong")
-		r.log.Info("task done id=%s fast-path duration=%.1fs", item.ID, time.Since(start).Seconds())
-		return
-	}
-	// "/reset" (alias "!restart") menghapus sesi, jadi pesan berikutnya mulai
-	// obrolan baru.
-	if isResetCommand(item.Text) {
-		if r.session != nil {
-			if err := r.session.Set(""); err != nil {
-				r.log.Error("session reset failed: %v", err)
-			}
-		}
-		if r.delegations != nil {
-			r.delegations.Clear(item.Chat)
-		}
-		r.markRead(item.Chat)
-		r.sendChunked("oke, kita mulai dari awal ya 😊")
-		r.log.Info("task done id=%s reset duration=%.1fs", item.ID, time.Since(start).Seconds())
+	if r.handleCommand(item, start) {
 		return
 	}
 
@@ -122,6 +104,201 @@ func (r *Relay) handleMessage(ctx context.Context, item taskItem) {
 	r.markRead(item.Chat)
 	r.sendChunked(reply)
 	r.log.Info("task done id=%s reply_len=%d duration=%.1fs", item.ID, len(reply), time.Since(start).Seconds())
+}
+
+// helpText menyusun daftar perintah berdasarkan prefix yang aktif.
+func helpText(cfg *Config) string {
+	p := CommandPrefix(cfg)
+	return fmt.Sprintf(
+		"Perintah yang tersedia:\n\n"+
+			"%shelp — tampilkan bantuan\n"+
+			"%sping — cek relay hidup\n"+
+			"%sreset — hapus sesi, mulai obrolan baru\n"+
+			"%srestart — alias %sreset\n"+
+			"%smodel — lihat/ganti model chat (contoh: %smodel 2)\n"+
+			"%sworker — cek status worker build (alias %scek)\n\n"+
+			"Perintah tidak peka huruf besar/kecil.",
+		p, p, p, p, p, p, p, p, p,
+	)
+}
+
+// handleCommand menjalankan perintah fast-path tanpa memanggil agent. Return
+// true berarti pesan sudah ditangani (termasuk perintah tak dikenal).
+func (r *Relay) handleCommand(item taskItem, start time.Time) bool {
+	name, prefixed := commandName(r.cfg, item.Text)
+	if !prefixed {
+		switch {
+		case strings.EqualFold(strings.TrimSpace(item.Text), "ping"):
+			name = "ping"
+		case isResetCommand(r.cfg, item.Text):
+			name = "reset"
+		default:
+			return false
+		}
+	}
+
+	// Alias ringkas: !model1 / !model2.
+	if strings.HasPrefix(name, "model") && len(name) > len("model") {
+		if n, err := strconv.Atoi(strings.TrimPrefix(name, "model")); err == nil {
+			r.handleModelCommand(item, []string{strconv.Itoa(n)})
+			r.log.Info("task done id=%s model duration=%.1fs", item.ID, time.Since(start).Seconds())
+			return true
+		}
+	}
+
+	switch name {
+	case "help":
+		r.markRead(item.Chat)
+		r.sendChunked(helpText(r.cfg))
+		r.log.Info("task done id=%s help duration=%.1fs", item.ID, time.Since(start).Seconds())
+	case "ping":
+		r.markRead(item.Chat)
+		r.sendChunked("pong")
+		r.log.Info("task done id=%s fast-path duration=%.1fs", item.ID, time.Since(start).Seconds())
+	case "model":
+		r.handleModelCommand(item, commandArgs(r.cfg, item.Text)[1:])
+		r.log.Info("task done id=%s model duration=%.1fs", item.ID, time.Since(start).Seconds())
+	case "worker", "workers", "cek":
+		r.handleWorkerCommand(item)
+		r.log.Info("task done id=%s worker duration=%.1fs", item.ID, time.Since(start).Seconds())
+	case "reset", "restart":
+		if r.session != nil {
+			if err := r.session.Set(""); err != nil {
+				r.log.Error("session reset failed: %v", err)
+			}
+		}
+		if r.delegations != nil {
+			r.delegations.Clear(item.Chat)
+		}
+		r.markRead(item.Chat)
+		r.sendChunked("oke, kita mulai dari awal ya 😊")
+		r.log.Info("task done id=%s reset duration=%.1fs", item.ID, time.Since(start).Seconds())
+	default:
+		p := CommandPrefix(r.cfg)
+		r.markRead(item.Chat)
+		r.sendChunked(fmt.Sprintf("perintah %s%s belum dikenal. Coba %shelp.", p, name, p))
+		r.log.Info("task done id=%s unknown-command duration=%.1fs", item.ID, time.Since(start).Seconds())
+	}
+	return true
+}
+
+// currentChatModel mengembalikan model chat yang sedang dipakai runner.
+func (r *Relay) currentChatModel() string {
+	if getter, ok := r.runner.(interface{ CurrentModel() string }); ok {
+		if m := getter.CurrentModel(); m != "" {
+			return m
+		}
+	}
+	return r.cfg.ChatModelName()
+}
+
+// setChatModel mengganti model chat pada runner (bila runner mendukung).
+func (r *Relay) setChatModel(model string) bool {
+	setter, ok := r.runner.(interface{ SetModel(string) })
+	if !ok {
+		return false
+	}
+	setter.SetModel(model)
+	return true
+}
+
+// handleModelCommand menampilkan atau mengganti model chat tanpa memanggil
+// agent. Contoh: "!model", "!model 2", "!model2", "!model opencode/..." .
+func (r *Relay) handleModelCommand(item taskItem, args []string) {
+	models := r.cfg.ChatModelList()
+	current := r.currentChatModel()
+	if len(models) == 0 {
+		r.markRead(item.Chat)
+		r.sendChunked("belum ada model chat yang dikonfigurasi.")
+		return
+	}
+
+	if len(args) == 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "Model chat sekarang: %s\n\n", current)
+		for i, m := range models {
+			marker := ""
+			if m == current {
+				marker = " (aktif)"
+			}
+			fmt.Fprintf(&b, "%d. %s%s\n", i+1, m, marker)
+		}
+		b.WriteString("\nGanti: ")
+		b.WriteString(CommandPrefix(r.cfg))
+		b.WriteString("model <nomor/nama>")
+		r.markRead(item.Chat)
+		r.sendChunked(strings.TrimSpace(b.String()))
+		return
+	}
+
+	choice := args[0]
+	target := ""
+	if n, err := strconv.Atoi(choice); err == nil {
+		if n >= 1 && n <= len(models) {
+			target = models[n-1]
+		}
+	} else {
+		for _, m := range models {
+			if strings.EqualFold(m, choice) {
+				target = m
+				break
+			}
+		}
+	}
+	if target == "" {
+		r.markRead(item.Chat)
+		r.sendChunked(fmt.Sprintf("model %q belum dikenal. Pilih 1-%d atau nama modelnya. Coba %smodel.", choice, len(models), CommandPrefix(r.cfg)))
+		return
+	}
+	if !r.setChatModel(target) {
+		r.markRead(item.Chat)
+		r.sendChunked("gagal ganti model: runner tidak mendukung pergantian saat runtime.")
+		return
+	}
+	r.markRead(item.Chat)
+	r.sendChunked(fmt.Sprintf("oke, model chat sekarang: %s", target))
+}
+
+// handleWorkerCommand menampilkan status slot build tanpa memanggil agent.
+// Contoh: "!worker", "!workers", atau "!cek".
+func (r *Relay) handleWorkerCommand(item taskItem) {
+	var slots []poolSlot
+	if r.workPool != nil {
+		slots = r.workPool.status()
+	}
+	r.markRead(item.Chat)
+	if len(slots) == 0 {
+		r.sendChunked("Worker build: belum ada slot yang dikonfigurasi.")
+		return
+	}
+
+	busy := 0
+	for _, s := range slots {
+		if s.Busy {
+			busy++
+		}
+	}
+	free := len(slots) - busy
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Worker build: %d slot, %d aktif, %d bebas.\n", len(slots), busy, free)
+	for i, s := range slots {
+		state := "bebas"
+		if s.Busy {
+			state = "aktif"
+		}
+		name := s.Workdir
+		if name == "" {
+			name = fmt.Sprintf("slot %d", i+1)
+		}
+		fmt.Fprintf(&b, "%d. %s — %s\n", i+1, name, state)
+	}
+	if free == 0 {
+		b.WriteString("Status: semua slot terpakai, tugas baru akan ditolak.")
+	} else {
+		b.WriteString("Status: siap menerima tugas.")
+	}
+	r.sendChunked(strings.TrimSpace(b.String()))
 }
 
 // proposeDelegation mengarahkan stepi untuk meringkas requirement tugas berat
@@ -261,7 +438,7 @@ func (r *Relay) runDelegation(ctx context.Context, item taskItem, d *Delegation,
 	if err != nil {
 		r.log.Error("delegation build failed: %v (stderr %dB)", err, len(stderr))
 		r.markRead(d.Chat)
-		r.sendChunked(errorNote(err, stderr))
+		r.notifyDelegationFailure(ctx, d, stdout, stderr, err)
 		r.log.Info("delegation failed id=%s delegate_id=%s duration=%.1fs", item.ID, d.ID, time.Since(d.CreatedAt).Seconds())
 		return
 	}
@@ -276,11 +453,41 @@ func (r *Relay) runDelegation(ctx context.Context, item taskItem, d *Delegation,
 	if err != nil {
 		r.log.Error("delegation summarize failed: %v", err)
 		r.markRead(d.Chat)
-		r.sendChunked(errorNote(err, ""))
+		r.sendChunked(errorNote(err, agentErrorDetail(sumStdout, "")))
 		return
 	}
 	reply := extractReply(sumStdout)
 	r.markRead(d.Chat)
 	r.sendChunked(reply)
 	r.log.Info("delegation done delegate_id=%s reply_len=%d duration=%.1fs", d.ID, len(reply), time.Since(d.CreatedAt).Seconds())
+}
+
+// notifyDelegationFailure menjelaskan kegagalan worker lewat stepi, memakai
+// sesi chat supaya percakapan mengingat penyebabnya. Kalau stepi ikut gagal
+// (mis. model chat kena limit), kirim detail mentah sebagai fallback.
+func (r *Relay) notifyDelegationFailure(ctx context.Context, d *Delegation, stdout, stderr string, err error) {
+	raw := agentErrorDetail(stdout, stderr)
+	fallback := errorNote(err, raw)
+	detail := raw
+	if detail == "" {
+		detail = fallback
+	}
+
+	prompt := fmt.Sprintf(failurePromptTemplate, truncateBytes(d.Text, summarizeMaxBytes), detail)
+	sessionID := r.beginSession(LaneChat, time.Now())
+	out, _, usedID, ferr := r.runRecovering(ctx, r.runnerFor(LaneChat), LaneChat, sessionID, "failure-"+d.ID, prompt)
+	if usedID == "" {
+		r.saveSessionFromOutput(LaneChat, out)
+	}
+	if ferr != nil {
+		r.log.Error("delegation failure explain failed: %v", ferr)
+		r.sendChunked(fallback)
+		return
+	}
+	reply := extractReply(out)
+	if strings.TrimSpace(reply) == "" {
+		r.sendChunked(fallback)
+		return
+	}
+	r.sendChunked(reply)
 }

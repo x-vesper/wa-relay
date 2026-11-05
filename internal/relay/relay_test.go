@@ -99,6 +99,13 @@ func (s *stubSender) SendFile(path, caption string) error {
 	return nil
 }
 
+func (s *stubSender) reset() {
+	s.mu.Lock()
+	s.sent = nil
+	s.files = nil
+	s.mu.Unlock()
+}
+
 func (s *stubSender) messages() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -192,7 +199,20 @@ type stubRunner struct {
 	prompt   string
 	delay    time.Duration
 	sessions []string
+	model    string
 	rec      func(event string)
+}
+
+func (s *stubRunner) SetModel(model string) {
+	s.mu.Lock()
+	s.model = model
+	s.mu.Unlock()
+}
+
+func (s *stubRunner) CurrentModel() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.model
 }
 
 func (s *stubRunner) Run(_ context.Context, prompt, sessionID string) (string, string, error) {
@@ -1047,6 +1067,45 @@ func TestDelegationSummarizePakaiSesiBaru(t *testing.T) {
 	}
 }
 
+func TestDelegationFailureExplainedByStepi(t *testing.T) {
+	cfg := testConfig(t)
+	chatRunner := &stubRunner{stdout: `{"type":"text","sessionID":"ses_chat","part":{"text":"Worker kena limit OpenCode. Coba lagi nanti ya."}}`}
+	workRunner := &stubRunner{
+		stdout: `{"type":"error","error":{"type":"provider.quota","message":"Free usage limit reached"}}`,
+		err:    errors.New("exit status 1"),
+	}
+	sender := &stubSender{}
+	r := newTestRelay(t, cfg, chatRunner, sender)
+	r.SetWorkPool([]TaskRunner{workRunner})
+	if err := r.session.Set("ses_existing"); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Delegation{ID: "w1", Text: "fix login", Chat: "chat", CreatedAt: time.Now()}
+	r.runDelegation(context.Background(), taskItem{ID: "c1", Chat: "chat"}, d, false)
+
+	got := sender.messages()
+	if len(got) != 1 || !strings.Contains(got[0], "limit OpenCode") {
+		t.Fatalf("notifikasi = %v, want penjelasan stepi", got)
+	}
+	chatRunner.mu.Lock()
+	prompt := chatRunner.prompt
+	calls := chatRunner.calls
+	sessions := append([]string(nil), chatRunner.sessions...)
+	chatRunner.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("chat calls = %d, want 1 (stepi menjelaskan kegagalan)", calls)
+	}
+	for _, want := range []string{"Free usage limit reached", "fix login"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt stepi = %q, tidak memuat %q", prompt, want)
+		}
+	}
+	if len(sessions) != 1 || sessions[0] != "ses_existing" {
+		t.Fatalf("sesi stepi = %v, want sesi chat yang sudah ada", sessions)
+	}
+}
+
 func TestDelegationBukanKonfirmasiDibatalkan(t *testing.T) {
 	cfg := testConfig(t)
 	runner := &echoRunner{}
@@ -1198,7 +1257,7 @@ func TestHandleMessageStopsScheduleAfterReply(t *testing.T) {
 }
 
 func TestWorkerResetClearsSession(t *testing.T) {
-	for _, in := range []string{" /reset ", "!restart", " !RESTART "} {
+	for _, in := range []string{" !reset ", "!restart", " !RESTART ", "/reset"} {
 		t.Run(in, func(t *testing.T) {
 			sender := &stubSender{}
 			runner := &stubRunner{stdout: `{"type":"text","part":{"text":"jawaban"}}`}
@@ -1219,6 +1278,147 @@ func TestWorkerResetClearsSession(t *testing.T) {
 				t.Fatalf("sent = %v, want a reset confirmation", msgs)
 			}
 		})
+	}
+}
+
+func TestWorkerHelpListsCommands(t *testing.T) {
+	sender := &stubSender{}
+	runner := &stubRunner{}
+	r := newTestRelay(t, testConfig(t), runner, sender)
+
+	r.handleMessage(context.Background(), taskItem{ID: "h", Text: " !HELP "})
+	if runner.calls != 0 {
+		t.Fatalf("runner calls = %d, want 0 (help tidak memanggil agent)", runner.calls)
+	}
+	got := sender.messages()
+	if len(got) != 1 {
+		t.Fatalf("sent = %d messages, want 1", len(got))
+	}
+	for _, want := range []string{"!help", "!ping", "!reset", "!restart", "!model", "!worker", "!cek"} {
+		if !strings.Contains(got[0], want) {
+			t.Fatalf("help = %q, tidak memuat %q", got[0], want)
+		}
+	}
+}
+
+func TestWorkerUnknownCommandDoesNotCallAgent(t *testing.T) {
+	sender := &stubSender{}
+	runner := &stubRunner{}
+	r := newTestRelay(t, testConfig(t), runner, sender)
+
+	r.handleMessage(context.Background(), taskItem{ID: "u", Text: "!ngawur"})
+	if runner.calls != 0 {
+		t.Fatalf("runner calls = %d, want 0", runner.calls)
+	}
+	got := sender.messages()
+	if len(got) != 1 || !strings.Contains(got[0], "belum dikenal") || !strings.Contains(got[0], "!help") {
+		t.Fatalf("sent = %v, want petunjuk !help", got)
+	}
+}
+
+func TestWorkerCustomCommandPrefix(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.CommandPrefix = "#"
+	sender := &stubSender{}
+	runner := &stubRunner{}
+	r := newTestRelay(t, cfg, runner, sender)
+
+	r.handleMessage(context.Background(), taskItem{ID: "c", Text: "#help"})
+	if runner.calls != 0 {
+		t.Fatalf("runner calls = %d, want 0", runner.calls)
+	}
+	got := sender.messages()
+	if len(got) != 1 || !strings.Contains(got[0], "#help") || strings.Contains(got[0], "!help") {
+		t.Fatalf("help = %v, want prefix #", got)
+	}
+}
+
+func TestWorkerModelCommandSwitchesChatModel(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ChatModels = []string{"opencode/model-a", "opencode/model-b"}
+	sender := &stubSender{}
+	runner := &stubRunner{}
+	r := newTestRelay(t, cfg, runner, sender)
+
+	r.handleMessage(context.Background(), taskItem{ID: "m1", Text: "!model 2"})
+	if runner.calls != 0 {
+		t.Fatalf("runner calls = %d, want 0 (ganti model tidak memanggil agent)", runner.calls)
+	}
+	if got := runner.CurrentModel(); got != "opencode/model-b" {
+		t.Fatalf("model = %q, want opencode/model-b", got)
+	}
+
+	// Alias ringkas !model1 harus kembali ke model pertama.
+	r.handleMessage(context.Background(), taskItem{ID: "m2", Text: "!model1"})
+	if got := runner.CurrentModel(); got != "opencode/model-a" {
+		t.Fatalf("model = %q, want opencode/model-a", got)
+	}
+
+	// !model tanpa argumen menampilkan daftar dan model aktif.
+	sender.reset()
+	r.handleMessage(context.Background(), taskItem{ID: "m3", Text: "!model"})
+	got := sender.messages()
+	if len(got) != 1 {
+		t.Fatalf("sent = %d messages, want 1", len(got))
+	}
+	for _, want := range []string{"opencode/model-a", "opencode/model-b", "(aktif)"} {
+		if !strings.Contains(got[0], want) {
+			t.Fatalf("model list = %q, tidak memuat %q", got[0], want)
+		}
+	}
+	if runner.calls != 0 {
+		t.Fatalf("runner calls = %d, want 0", runner.calls)
+	}
+}
+
+func TestWorkerCommandShowsBuildSlots(t *testing.T) {
+	cfg := testConfig(t)
+	sender := &stubSender{}
+	runner := &stubRunner{}
+	r := newTestRelay(t, cfg, runner, sender)
+	r.SetWorkPool([]TaskRunner{
+		&ExecRunner{Workdir: "/tmp/build-1"},
+		&ExecRunner{Workdir: "/tmp/build-2"},
+	})
+
+	_, release, ok := r.workPool.acquire()
+	if !ok {
+		t.Fatal("slot pertama harusnya bebas")
+	}
+	defer release()
+
+	r.handleMessage(context.Background(), taskItem{ID: "w", Text: "!worker"})
+	if runner.calls != 0 {
+		t.Fatalf("runner calls = %d, want 0 (status worker tidak memanggil agent)", runner.calls)
+	}
+	got := sender.messages()
+	if len(got) != 1 {
+		t.Fatalf("sent = %d messages, want 1", len(got))
+	}
+	for _, want := range []string{"2 slot", "1 aktif", "1 bebas", "/tmp/build-1", "/tmp/build-2", "siap"} {
+		if !strings.Contains(got[0], want) {
+			t.Fatalf("status worker = %q, tidak memuat %q", got[0], want)
+		}
+	}
+
+	// Alias !cek harus menampilkan status yang sama.
+	sender.reset()
+	r.handleMessage(context.Background(), taskItem{ID: "w2", Text: "!cek"})
+	got = sender.messages()
+	if len(got) != 1 || !strings.Contains(got[0], "Worker build: 2 slot") {
+		t.Fatalf("!cek = %v, want status worker", got)
+	}
+}
+
+func TestExecRunnerSetModel(t *testing.T) {
+	runner := &ExecRunner{Workdir: "/w", Model: "model-a"}
+	if got := runner.CurrentModel(); got != "model-a" {
+		t.Fatalf("CurrentModel = %q, want model-a", got)
+	}
+	runner.SetModel("model-b")
+	args := strings.Join(runner.args(""), " ")
+	if !strings.Contains(args, "--model model-b") || strings.Contains(args, "--model model-a") {
+		t.Fatalf("args = %q, want model-b", args)
 	}
 }
 
@@ -1277,21 +1477,54 @@ func TestWorkerLongReplyIsChunked(t *testing.T) {
 
 func TestExecRunnerArgs(t *testing.T) {
 	withAgent := strings.Join((&ExecRunner{Workdir: "/w", Agent: "stepi"}).args(""), " ")
-	wantWith := "run --dir /w --format json --title wa-relay --agent stepi"
+	wantWith := "run --format json --title wa-relay --agent stepi"
 	if withAgent != wantWith {
 		t.Fatalf("args = %q, want %q", withAgent, wantWith)
 	}
 
 	withSession := strings.Join((&ExecRunner{Workdir: "/w", Agent: "stepi"}).args("ses_1"), " ")
-	wantSession := "run --dir /w --format json --title wa-relay --agent stepi --session ses_1"
+	wantSession := "run --format json --title wa-relay --agent stepi --session ses_1"
 	if withSession != wantSession {
 		t.Fatalf("args = %q, want %q", withSession, wantSession)
 	}
 
 	withoutAgent := strings.Join((&ExecRunner{Workdir: "/w"}).args(""), " ")
-	wantWithout := "run --dir /w --format json --title wa-relay"
+	wantWithout := "run --format json --title wa-relay"
 	if withoutAgent != wantWithout {
 		t.Fatalf("args = %q, want %q", withoutAgent, wantWithout)
+	}
+
+	withModel := strings.Join((&ExecRunner{Workdir: "/w", Agent: "stepi", Model: "opencode/deepseek-v4.1-flash-free"}).args(""), " ")
+	wantModel := "run --format json --title wa-relay --agent stepi --model opencode/deepseek-v4.1-flash-free"
+	if withModel != wantModel {
+		t.Fatalf("args = %q, want %q", withModel, wantModel)
+	}
+}
+
+func TestConfigPerLaneModelFallback(t *testing.T) {
+	cfg := &Config{Model: "fallback"}
+	if got := cfg.ChatModelName(); got != "fallback" {
+		t.Fatalf("ChatModelName fallback = %q, want fallback", got)
+	}
+	if got := cfg.WorkModelName(); got != "fallback" {
+		t.Fatalf("WorkModelName fallback = %q, want fallback", got)
+	}
+
+	cfg.ChatModel = "chat-model"
+	cfg.WorkModel = "work-model"
+	if got := cfg.ChatModelName(); got != "chat-model" {
+		t.Fatalf("ChatModelName = %q, want chat-model", got)
+	}
+	if got := cfg.WorkModelName(); got != "work-model" {
+		t.Fatalf("WorkModelName = %q, want work-model", got)
+	}
+
+	cfg.ChatModels = []string{" chat-a ", "", "chat-b"}
+	if got := cfg.ChatModelName(); got != "chat-a" {
+		t.Fatalf("ChatModelName list = %q, want chat-a", got)
+	}
+	if got := cfg.ChatModelList(); len(got) != 2 || got[0] != "chat-a" || got[1] != "chat-b" {
+		t.Fatalf("ChatModelList = %v, want [chat-a chat-b]", got)
 	}
 }
 
@@ -1347,6 +1580,22 @@ func TestExecRunnerCapturesStdout(t *testing.T) {
 	}
 	if got := extractReply(stdout); got != "OK" {
 		t.Fatalf("extractReply = %q, want OK", got)
+	}
+}
+
+func TestExecRunnerUsesWorkdirAsCwd(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-opencode")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\npwd\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &ExecRunner{Bin: script, Workdir: dir, BaseDir: t.TempDir(), Timeout: 5 * time.Second}
+	stdout, _, err := runner.Run(context.Background(), "hi", "")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := strings.TrimSpace(stdout); got != dir {
+		t.Fatalf("cwd = %q, want %q", got, dir)
 	}
 }
 
@@ -1643,7 +1892,7 @@ func TestMarkReadOnFastPath(t *testing.T) {
 		reader := &stubMarkReader{rec: elog.add}
 		r.reader = reader
 
-		r.handleMessage(context.Background(), taskItem{ID: "r", Text: "/reset", Chat: cfg.OwnerJID})
+		r.handleMessage(context.Background(), taskItem{ID: "r", Text: "!reset", Chat: cfg.OwnerJID})
 		if runner.calls != 0 {
 			t.Fatalf("runner calls = %d, want 0", runner.calls)
 		}

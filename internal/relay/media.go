@@ -30,7 +30,11 @@ func (d *WacliMediaDownloader) Download(chat, msgID, filename string) (string, e
 	out := filepath.Join(d.Dir, safeMediaName(msgID, filename))
 	ctx, cancel := context.WithTimeout(context.Background(), mediaDownloadTmo)
 	defer cancel()
-	if err := runCommand(ctx, d.Bin, "media", "download", "--chat", chat, "--id", msgID, "--output", out); err != nil {
+	// --read-only wajib: `wacli sync --follow` memegang lock store selama
+	// hidupnya, jadi tanpa flag ini unduhan selalu gagal "store is locked".
+	// Dengan --read-only (dan --output eksplisit) unduhan tidak menyentuh
+	// store dan tetap jalan saat sync aktif.
+	if err := runCommand(ctx, d.Bin, "--read-only", "media", "download", "--chat", chat, "--id", msgID, "--output", out); err != nil {
 		return "", err
 	}
 	if info, err := os.Stat(out); err != nil || info.IsDir() {

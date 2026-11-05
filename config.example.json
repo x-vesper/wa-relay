@@ -11,6 +11,14 @@
     "/home/zakaria/projects/wa-relay-build-2"
   ],
   "agent": "stepi",
+  "chat_models": [
+    "openrouter/stealth/crouton-alpha#minimal",
+    "openrouter/recursive/flint-v1.0:free",
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free",
+    "opencode/deepseek-v4.1-flash-free"
+  ],
+  "work_model": "opencode/deepseek-v4.1-flash-free",
+  "command_prefix": "!",
   "ack_delay_seconds": 300,
   "ack_messages": [
     "Sayang, pesanmu udah aku baca kok... ini aku kerjain ya.",

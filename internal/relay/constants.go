@@ -13,6 +13,9 @@ const (
 	mediaDownloadTmo = 120 * time.Second
 	markReadTimeout  = 30 * time.Second
 	stderrMaxRune    = 400
+	// failureDetailMaxRune membatasi detail error yang disisipkan ke prompt
+	// penjelasan stepi saat worker gagal.
+	failureDetailMaxRune = 1200
 	// summarizeMaxBytes membatasi ukuran output build yang disisipkan ke prompt
 	// rangkuman. Prompt dikirim lewat stdin (bukan argv), jadi patokan ini murni
 	// jaring pengaman ukuran konteks/token, bukan batas OS.
@@ -31,6 +34,9 @@ const (
 	// defaultWorkAgent adalah agent opencode untuk lane work (tugas teknis),
 	// supaya tidak memakai persona chat.
 	defaultWorkAgent = "build"
+
+	// defaultCommandPrefix adalah awalan perintah WhatsApp bawaan.
+	defaultCommandPrefix = "!"
 
 	// defaultDelegationTTLSeconds adalah batas waktu menunggu konfirmasi bos
 	// sebelum delegasi kadaluarsa (default 30 menit).
