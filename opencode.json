@@ -1,5 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "snapshots": false,
   "permission": {
     "read": "allow",
     "edit": "allow",
