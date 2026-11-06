@@ -142,6 +142,15 @@ func isMissingSession(stderr string) bool {
 	return strings.Contains(strings.ToLower(stderr), "session not found")
 }
 
+// isQuotaExhausted melaporkan apakah kegagalan opencode disebabkan kuota/token
+// provider habis (mis. "Insufficient account funds" / 402).
+func isQuotaExhausted(detail string) bool {
+	d := strings.ToLower(detail)
+	return strings.Contains(d, "insufficient account funds") ||
+		strings.Contains(d, "quota") ||
+		strings.Contains(d, "402")
+}
+
 // agentErrorDetail mengambil pesan error dari event NDJSON `opencode run`
 // (tipe "error") atau dari stderr. OpenCode menulis error provider seperti
 // kuota/limit ke stdout, jadi tanpa ini penyebabnya cuma kelihatan di log.
@@ -225,8 +234,8 @@ var (
 // stripReasoning membuang blok/tag reasoning yang kadang ikut tercampur di dalam
 // part teks (mis. "</thinking>" atau "</think>" nyasar), supaya yang terkirim
 // hanya balasan asli.
-func stripReasoning(s string) string {
-	if !strings.Contains(s, "think") {
+func stripReasoning(s string, isStepi bool) string {
+	if !isStepi || !strings.Contains(s, "think") {
 		return s
 	}
 	s = thinkingRe.ReplaceAllString(s, "")
@@ -254,12 +263,11 @@ func stripReasoning(s string) string {
 }
 
 // extractReply pulls the agent's answer out of NDJSON stdout. It never panics.
-func extractReply(stdout string) (result string) {
+func extractReply(stdout string, isStepi bool) string {
 	defer func() {
 		if recover() != nil {
-			result = ""
+			return
 		}
-		result = strings.TrimSpace(stripReasoning(result))
 	}()
 	var parts []string
 	var fallbacks []string
@@ -275,6 +283,9 @@ func extractReply(stdout string) (result string) {
 		if t, _ := obj["type"].(string); t == "text" {
 			if part, ok := obj["part"].(map[string]any); ok {
 				if text, ok := part["text"].(string); ok && text != "" {
+					if isStepi {
+						text = stripReasoning(text, true)
+					}
 					parts = append(parts, text)
 				}
 			}
@@ -282,18 +293,32 @@ func extractReply(stdout string) (result string) {
 		fallbacks = append(fallbacks, collectTextFields(obj)...)
 	}
 	if len(parts) > 0 {
-		return strings.TrimSpace(strings.Join(parts, "\n"))
+		result := strings.TrimSpace(strings.Join(parts, "\n"))
+		if isStepi {
+			result = stripReasoning(result, true)
+		}
+		return result
 	}
 	if len(fallbacks) > 0 {
-		return strings.TrimSpace(strings.Join(fallbacks, "\n"))
+		result := strings.TrimSpace(strings.Join(fallbacks, "\n"))
+		if isStepi {
+			result = stripReasoning(result, true)
+		}
+		return result
 	}
 	lines := strings.Split(stdout, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		if strings.TrimSpace(lines[i]) != "" {
-			return strings.TrimSpace(lines[i])
+			return strings.TrimSpace(stripReasoning(lines[i], isStepi))
 		}
 	}
 	return ""
+}
+
+// Relay.extractReply adalah method yang hanya bisa digunakan di dalam Relay.
+func (r *Relay) extractReply(stdout string) (result string) {
+	isStepi := r.cfg.Agent == "stepi-chat"
+	return extractReply(stdout, isStepi)
 }
 
 func collectTextFields(v any) []string {

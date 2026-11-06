@@ -95,12 +95,17 @@ func (r *Relay) handleMessage(ctx context.Context, item taskItem) {
 	if err != nil {
 		r.log.Error("opencode failed: %v (stderr %dB)", err, len(stderr))
 		r.markRead(item.Chat)
-		r.sendChunked(errorNote(err, stderr))
+		detail := agentErrorDetail(stdout, stderr)
+		note := errorNote(err, detail)
+		if isQuotaExhausted(detail) {
+			note = "(error: token habis)"
+		}
+		r.sendChunked(note)
 		r.log.Info("task failed id=%s duration=%.1fs", item.ID, time.Since(start).Seconds())
 		return
 	}
 	r.log.Info("opencode done duration=%.1fs stdout=%dB stderr=%dB", time.Since(start).Seconds(), len(stdout), len(stderr))
-	reply := extractReply(stdout)
+	reply := r.extractReply(stdout)
 	r.markRead(item.Chat)
 	r.sendChunked(reply)
 	r.log.Info("task done id=%s reply_len=%d duration=%.1fs", item.ID, len(reply), time.Since(start).Seconds())
@@ -323,7 +328,7 @@ func (r *Relay) proposeDelegation(ctx context.Context, item taskItem) {
 		r.sendChunked(errorNote(err, ""))
 		return
 	}
-	reply := extractReply(stdout)
+	reply := r.extractReply(stdout)
 	r.markRead(item.Chat)
 	r.sendChunked(reply)
 	if r.delegations != nil {
@@ -366,7 +371,7 @@ func (r *Relay) runHandover(ctx context.Context, item taskItem) {
 	if err != nil {
 		r.log.Error("handover spec failed: %v", err)
 	}
-	spec := strings.TrimSpace(extractReply(stdout))
+	spec := strings.TrimSpace(r.extractReply(stdout))
 	if spec == "" {
 		spec = strings.TrimSpace(item.Text)
 	}
@@ -395,7 +400,7 @@ func (r *Relay) sendBusy(ctx context.Context, item taskItem) {
 		r.sendChunked(busyFallback)
 		return
 	}
-	reply := extractReply(stdout)
+	reply := r.extractReply(stdout)
 	if reply == "" {
 		reply = busyFallback
 	}
@@ -456,7 +461,7 @@ func (r *Relay) runDelegation(ctx context.Context, item taskItem, d *Delegation,
 		r.sendChunked(errorNote(err, agentErrorDetail(sumStdout, "")))
 		return
 	}
-	reply := extractReply(sumStdout)
+	reply := r.extractReply(sumStdout)
 	r.markRead(d.Chat)
 	r.sendChunked(reply)
 	r.log.Info("delegation done delegate_id=%s reply_len=%d duration=%.1fs", d.ID, len(reply), time.Since(d.CreatedAt).Seconds())
@@ -484,7 +489,7 @@ func (r *Relay) notifyDelegationFailure(ctx context.Context, d *Delegation, stdo
 		r.sendChunked(fallback)
 		return
 	}
-	reply := extractReply(out)
+	reply := r.extractReply(out)
 	if strings.TrimSpace(reply) == "" {
 		r.sendChunked(fallback)
 		return

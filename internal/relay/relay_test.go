@@ -649,7 +649,8 @@ func TestExtractReply(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := extractReply(tc.stdout); got != tc.want {
+			isStepi := strings.Contains(tc.name, "thinking")
+			if got := extractReply(tc.stdout, isStepi); got != tc.want {
 				t.Fatalf("extractReply() = %q, want %q", got, tc.want)
 			}
 		})
@@ -1578,7 +1579,7 @@ func TestExecRunnerCapturesStdout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if got := extractReply(stdout); got != "OK" {
+	if got := extractReply(stdout, false); got != "OK" {
 		t.Fatalf("extractReply = %q, want OK", got)
 	}
 }
